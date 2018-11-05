@@ -79,10 +79,12 @@ class UrlExtractor
     /**
      * Returns absolute URLs based on the context URL
      *
-     * @param string $parts
-     * @return array extracted absolute URLs
+     * @param string $contextUrl the prefix for relative urls
+     * @param string $html the page to extract urls from
+     * @param string $parts optional dot-separated string of urls segments to use @see UrlHelper::get($parts)
+     * @return iterable extracted absolute URLs
      */
-    public function getAbsoluteUrls(string $contextUrl, string $html, string $parts='base.dir.file.ext.query') : array
+    public function getAbsoluteUrls(string $contextUrl, string $html, string $parts='base.dir.file.ext.query') : iterable
     {
         $this->context = $contextUrl;
         $urls = $this->getUrls($html, $parts);
@@ -103,10 +105,11 @@ class UrlExtractor
     /**
     * Returns URLs extracted from the HTML text
     *
-    * @param string $parts
-    * @return array extracted URLs
+    * @param string $html the page to extract urls from
+    * @param string $parts optional dot-separated string of urls segments to use @see UrlHelper::get($parts)
+    * @return iterable extracted URLs
     */
-    public function getUrls(string $html, string $parts='base.dir.file.ext.query') : array
+    public function getUrls(string $html, string $parts='base.dir.file.ext.query') : iterable
     {
         return array_map(
             function ($url) {
@@ -122,6 +125,14 @@ class UrlExtractor
         );
     }
 
+    /**
+    * Filter excludes URLs that have a file extensions (eg. .css) in the list of ignored extensions.
+    *
+    * Does not exclude URLs with no host.
+    *
+    * @param array $urls URLs to filter
+    * @return array filtered URLs
+    */
     private function filterExtensions(array $urls) : array
     {
         return (empty($this->options->extensions))
@@ -251,6 +262,16 @@ class UrlExtractor
         });
     }
 
+    /**
+     * Returns an array URLs extracted from the HTML text.
+     *
+     * The retured array is not filtered, unless the distinctUrls option is true,
+     * in which case the returned array only contains distinct urls.
+     *
+     * @param string $html the page to extract urls from
+     * @param string $parts optional dot-separated string of urls segments to use @see UrlHelper::get($parts)
+     * @return array extracted URLs
+     */
     private function getAllUrls(string $html, string $parts) : array
     {
         $urls = [];
