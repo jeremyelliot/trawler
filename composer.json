@@ -1,0 +1,39 @@
+{
+    "name": "/trawler",
+    "description": "Continuous web crawler",
+    "keywords": ["scraper", "crawler"],
+    "license": "MIT",
+    "type": "project",
+    "require": {
+        "php": "^7.1.3",
+        "guzzlehttp/guzzle": "^6.3",
+        "jenssegers/mongodb": "^3.4",
+        "jeremyelliot/urlhelper": "^1.1",
+        "jkphl/micrometa": "^2.1",
+        "monolog/monolog": "^1.23",
+        "vipnytt/robotstxtparser": "^2.0"
+    },
+    "require-dev": {
+        "filp/whoops": "^2.0",
+        "mockery/mockery": "^1.0",
+        "nunomaduro/collision": "^2.0",
+        "phpunit/phpunit": "^7.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Trawler\\": "src/Trawler/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "optimize-autoloader": true
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
