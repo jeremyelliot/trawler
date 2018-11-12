@@ -12,6 +12,9 @@ use \vipnytt\RobotsTxtParser\TxtClient;
 use \vipnytt\RobotsTxtParser\Client\Directives\UserAgentClient;
 use \Trawler\Service\Interfaces\PagesServiceInterface;
 use \Trawler\Service\Interfaces\HostsServiceInterface;
+use Ds\Deque;
+use Ds\Set;
+use Ds\Map;
 
 class PagesService implements PagesServiceInterface
 {
@@ -31,10 +34,10 @@ class PagesService implements PagesServiceInterface
     private $hostsService;
 
     /**
-     * urls know to exist already, to reduce unnecessary updates (array)
-     * @var array $knownUrls
+     * urls known to exist already, to reduce unnecessary updates (Set)
+     * @var Set $knownUrls
      */
-    private $knownUrls = [];
+    private $knownUrls;
 
     /**
      * Maximum size of $knownUrls array (int)
@@ -43,7 +46,6 @@ class PagesService implements PagesServiceInterface
     private $maxKnownUrls = 10000;
 
     /**
-     *
      *
      * @var bool
      */
@@ -61,14 +63,36 @@ class PagesService implements PagesServiceInterface
      *          'http://www.example.co.nz/about.html'
      *      ]
      *  ]
-     * @var array<object> $urlsBatches
+     * Map<array> $urlsBatches
      */
-    private $urlsBatches = [];
+    private $urlsBatches;
 
-    private $batchSize = 100;
+    /**
+     * Size of batches of hosts and urls
+     * If autoIncreaseBatchSize is true, batchSize is the initial size.
+     * @var int
+     */
+    private $batchSize = 20;
 
-    private $hostsCache = [];
-    private $hostsCacheIndex = 0;
+    /**
+    * Increases batchSize +1 each time the hosts cycle finishes before (crawlDelay) milliseconds.
+    * batchSize can be auto-increased until it reaches $maxBatchSize.
+    * @var int $hostsCrawlDelay
+    */
+    private $autoIncreaseBatchSize = false;
+
+    /**
+     * Maximum size of batches when autoIncreaseBatchSize is true
+     * @var int
+     */
+    private $maxBatchSize = 32;
+
+    /**
+     * Ds\Deque $hostsCache
+     * @var Deque
+     */
+    private $hostsCache;
+    private $hostsCacheIterations = 1;
     /**
      * milliseconds between cycles of hosts cache
      * @var int $hostsCrawlDelay
@@ -84,6 +108,8 @@ class PagesService implements PagesServiceInterface
     /** @var array $pendingWrites */
     private $pendingBulkWrites = [];
     private $maxPendingBulkWrites = 10;
+
+    private $wasUrlFound = false;
 
     /**
      * Takes an array of options for connecting to the database
@@ -107,7 +133,8 @@ class PagesService implements PagesServiceInterface
         ]);
         $this->collection = $client->$database->$collection;
         $this->hostsService = $hostsService;
-        foreach (['batchSize', 'maxPendingBulkWrites', 'maxKnownUrls', 'preloadKnownUrls', 'crawlDelay'] as $key) {
+        foreach (['batchSize', 'maxBatchSize', 'autoIncreaseBatchSize', 'maxPendingBulkWrites', 'maxKnownUrls',
+                    'preloadKnownUrls', 'crawlDelay'] as $key) {
             if (isset($serviceOptions[$key])) {
                 $this->$key = $serviceOptions[$key];
             }
@@ -115,7 +142,11 @@ class PagesService implements PagesServiceInterface
         if ($this->preloadKnownUrls) {
             $this->loadKnownUrls();
         }
-        $this->hostsCycleTime = (int) (microtime(true) * 1000);
+        $this->knownUrls = new Set();
+        $this->hostsCycleTime = (int) ((microtime(true) * 1000) - $this->crawlDelay);
+        $this->hostsCache = new Deque();
+        $this->hostsCache->allocate($this->batchSize);
+        $this->urlsBatches = new Map();
     }
 
     /**
@@ -123,9 +154,14 @@ class PagesService implements PagesServiceInterface
      */
     private function loadKnownUrls()
     {
-        $this->knownUrls = array_map(function ($page) {
-            return $page->url;
-        }, $this->collection->find([], ['limit' => (int) ($this->maxKnownUrls / 2)])->toArray());
+        $this->knownUrls = new Set(
+            array_map(
+                function ($page) {
+                    return $page->url;
+                },
+                $this->collection->find([], ['limit' => (int) ($this->maxKnownUrls / 2)])->toArray()
+            )
+        );
     }
 
     /**
@@ -136,8 +172,7 @@ class PagesService implements PagesServiceInterface
     public function getNextUrl() : string
     {
         do {
-            // get the next host to be crawled
-            $host = $this->hostsService->getNextHostToCrawl();
+            $host = $this->getNextHost();
             // if there is no next host, nothing more can be done
             if (empty($host)) {
                 return '';
@@ -145,8 +180,16 @@ class PagesService implements PagesServiceInterface
             do {
                 // get the next url for selected host
                 $url = $this->getNextUrlForHost($host->host);
-                // if there is no next url for this host, return to outer loop to get next host
+                // if there is no next url for this host,
                 if (empty($url)) {
+                    // Remmove host from the hostsCache
+                    $hostIndex = $this->hostsCache->find($host);
+                    if ($hostIndex !== false) {
+                        $this->hostsCache->remove($hostIndex);
+                    }
+                    $host->status = HostsService::HOST_STATUS_DONE;
+                    $this->hostsService->updateHost($host);
+                    // return to outer loop to get next host
                     break;
                 }
                 $isCrawlingAllowed = $this->isCrawlingAllowed($host->host, $host->robots->txt, $url);
@@ -156,6 +199,7 @@ class PagesService implements PagesServiceInterface
                 }
             } while (!$isCrawlingAllowed);
         } while (empty($url));
+        $this->wasUrlFound = true; // URL has been handed out so getNextHost might have to sleep to respect crawlDelay
         return $url;
     }
 
@@ -170,16 +214,41 @@ class PagesService implements PagesServiceInterface
      */
     private function getNextHost() : ?object
     {
-        if (count($this->hostsCache) < $this->batchSize) {
+        // replace a host in the cache ofter (batchSize) iterations
+        if ($this->hostsCacheIterations > ($this->batchSize * $this->batchSize)) {
+            if (!$this->hostsCache->isEmpty()) {
+                $removedHost = $this->hostsCache->pop();
+                $this->removeHostUrls($removedHost->host);
+            }
+            $this->hostsCacheIterations = 1;
+        }
+        // if beginning hosts cycle again ...
+        if ($this->hostsCacheIterations % $this->batchSize === 0) {
+            // if no url was found during previous cycle, no wait is required
+            if ($this->wasUrlFound) {
+                $nowMillis = (int) (microtime(true) * 1000);
+                $millisToWait = $this->crawlDelay + $this->hostsCycleTime - $nowMillis;
+                if ($millisToWait > 0) {
+                    if ($this->autoIncreaseBatchSize) {
+                        $this->batchSize = min(++$this->batchSize, $this->maxBatchSize);
+                    }
+                    usleep($millisToWait * 1000);
+                }
+                $this->wasUrlFound = false; // don't sleep if no URLs where handed out in the previous iteration
+                $this->hostsCycleTime = $nowMillis;
+            }
+        }
+        // if hostsCache is not full, get a new host from the hostsService
+        if ($this->hostsCache->count() < $this->batchSize) {
             $host = $this->hostsService->getNextHostToCrawl();
-            $this->hostsCache[$host->host] = $host;
-            return $host;
+        } else {
+            // get the next host from the cache
+            $host = $this->hostsCache->shift();
         }
-        $this->hostsCacheIndex = $this->hostsCacheIndex++ % count($this->hostsCache);
-        if ($this->hostsCacheIndex === (count($this->hostsCache) - 1)) {
-            usleep($this->crawlDelay * 1000);
-        }
-        return $this->hostsCache[$this->hostsCacheIndex];
+        // move host to back of queue
+        $this->hostsCache->push($host);
+        $this->hostsCacheIterations++;
+        return $host;
     }
 
     /**
@@ -191,14 +260,20 @@ class PagesService implements PagesServiceInterface
      * @param string $host name of host
      * @return string url
      */
-    private function getNextUrlForHost(string $host) : ?string
+    private function getNextUrlForHost(string $hostname) : ?string
     {
-        if (empty($this->urlsBatches[$host])) {
-            $this->urlsBatches[$host] = array_map(function ($url) {
+        if (empty($this->urlsBatches[$hostname])) {
+            // get another batch of urls for $hostname
+            $this->urlsBatches[$hostname] = array_map(function ($url) {
                 return $url->url;
-            }, $this->getNextUrlsBatch($host));
+            }, $this->getNextUrlsBatch($hostname));
         }
-        return array_pop($this->urlsBatches[$host]);
+        // still no urls? remove host from urlsBatches
+        if (empty($this->urlsBatches[$hostname])) {
+            $this->urlsBatches->remove($hostname);
+            return null;
+        }
+        return array_pop($this->urlsBatches[$hostname]);
     }
 
     /**
@@ -216,21 +291,17 @@ class PagesService implements PagesServiceInterface
             ],
             ['limit' => $this->batchSize]
         )->toArray();
-        // if there are no more URLs for the host, remove them from the caches
-        if (empty($urls)) {
-            unset($this->urlsBatches[$hostname]);
-            unset($this->hostsCache[$hostname]);
-            return [];
+        if (!empty($urls)) {
+            $this->collection->bulkWrite(
+                array_map(function ($url) {
+                    return ['updateOne' => [
+                                ['_id' => $url->_id],
+                                ['$set' => ['status' => self::STATUS_FETCHING]]
+                            ]];
+                }, $urls),
+                ['ordered' => false, 'writeConcern' => new WriteConcern(0)]
+            );
         }
-        $this->collection->bulkWrite(
-            array_map(function ($url) {
-                return ['updateOne' => [
-                        ['_id' => $url->_id],
-                        ['$set' => ['status' => self::STATUS_FETCHING]]
-                    ]];
-            }, $urls),
-            ['ordered' => false, 'writeConcern' => new WriteConcern(0)]
-        );
         return $urls;
     }
 
@@ -255,7 +326,6 @@ class PagesService implements PagesServiceInterface
                     $url = "http:$url";
                 }
             }
-            // $client = ;
             return (!((new TxtClient($hostname, 200, $robotsTxt))->userAgent(self::USER_AGENT_NAME)->isDisallowed($url)));
         } catch (\Exception $e) {
             var_dump($e);
@@ -314,7 +384,7 @@ class PagesService implements PagesServiceInterface
             );
         if (!empty($page)) {
             $page->content = gzuncompress(base64_decode($page->content));
-            $this->knownUrls[$page->url] = true;
+            $this->knownUrls->add($page->url);
         }
         return $page;
     }
@@ -351,7 +421,8 @@ class PagesService implements PagesServiceInterface
         }
         $updates = [];
         foreach ($urls as $url) {
-            if (!isset($this->knownUrls[$url])) {
+            // check url is not already known
+            if (!$this->knownUrls->contains($url)) {
                 $host = (string) (new UrlHelper($url))->get('base');
                 $this->hostsService->addHost($host);
                 $updates[] = ['updateOne' => [
@@ -359,7 +430,7 @@ class PagesService implements PagesServiceInterface
                             ['$set' => ['url' => "$url", 'host' => $host]],
                             ['upsert' => true]
                         ]];
-                $this->knownUrls[$url] = true;
+                $this->knownUrls->add($url);
             }
         }
         $this->pendingBulkWrites += $updates;
@@ -370,8 +441,8 @@ class PagesService implements PagesServiceInterface
             );
             $this->pendingBulkWrites = [];
         }
-        if (count($this->knownUrls) > $this->maxKnownUrls) {
-            $this->knownUrls = array_slice($this->knownUrls, (int) $this->maxKnownUrls / 2, null, true);
+        if ($this->knownUrls->count() > $this->maxKnownUrls) {
+            $this->knownUrls = $this->knownUrls->slice((int) $this->maxKnownUrls / -2);
         }
         return count($updates);
     }
@@ -438,7 +509,7 @@ class PagesService implements PagesServiceInterface
             );
         }
         // return unfetched urls with status: 'fetching' to status: [not set]
-        if (!empty($this->urlsBatches)) {
+        if (!$this->urlsBatches->isEmpty()) {
             $updates = [];
             foreach ($this->urlsBatches as $hostname => $urls) {
                 if (!empty($urls)) {
@@ -452,5 +523,29 @@ class PagesService implements PagesServiceInterface
             }
             $this->collection->bulkWrite($updates, ['ordered' => false, 'writeConcern' => new WriteConcern(0)]);
         }
+    }
+
+    /**
+     * Remove a host and its urls from urlsBatches
+     *
+     * Removed urls have their status unset from 'fetching' to [not exists]
+     *
+     * @param string $hostname
+     */
+    private function removeHostUrls(string $hostname)
+    {
+        if (!$this->urlsBatches->hasKey($hostname)) {
+            return;
+        }
+        if (!empty($this->urlsBatches[$hostname])) {
+            foreach ($this->urlsBatches[$hostname] as $url) {
+                $updates[] = ['updateOne' => [
+                    ['url' => $url],
+                    ['$unset' => ['status' => '']]
+                ]];
+            }
+            $this->collection->bulkWrite($updates, ['ordered' => false, 'writeConcern' => new WriteConcern(0)]);
+        }
+        $this->urlsBatches->remove($hostname);
     }
 }

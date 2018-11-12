@@ -4,9 +4,12 @@ namespace Trawler\Service;
 
 use \MongoDB\Client;
 use \MongoDB\Collection;
+use \MongoDB\Driver\WriteConcern;
 use MongoDB\Driver\Cursor;
 use MongoDB\BSON\UTCDateTime;
 use \Trawler\Service\Interfaces\HostsServiceInterface;
+use Ds\Set;
+use Ds\Vector;
 
 /**
  * Provides hosts data
@@ -17,6 +20,7 @@ class HostsService implements HostsServiceInterface
     const HOST_STATUS_BLOCKED = 'blocked';
     const HOST_STATUS_EXCLUDE = 'exclude';
     const HOST_STATUS_ERROR = 'error';
+    const HOST_STATUS_DONE = 'done';
 
     /**
      * @var Collection
@@ -34,13 +38,13 @@ class HostsService implements HostsServiceInterface
      * milliseconds between refreshing host data
      * @var int
      */
-    private $hostRefreshPeriod = 24 * 60 * 60 * 1000;
+    private $hostRefreshPeriod = 7 * 24 * 60 * 60 * 1000;
 
     /**
      * Array of know hostnames, to reduce number of db requests
-     * @var array
+     * @var Set
      */
-    private $knownHosts = [];
+    private $knownHosts;// = [];
 
     /**
      * Maximum size of $knownHosts array
@@ -51,7 +55,7 @@ class HostsService implements HostsServiceInterface
     private $batchSize = 100;
     /**
      *
-     * @var array<object>
+     * @var Vector
      */
     private $hostsBatch = [];
 
@@ -86,6 +90,8 @@ class HostsService implements HostsServiceInterface
                 $this->$key = $serviceOptions[$key];
             }
         }
+        $this->knownHosts = new Set();
+        $this->hostsBatch = new Vector();
     }
 
     /**
@@ -99,10 +105,10 @@ class HostsService implements HostsServiceInterface
      */
     public function getNextHostToCrawl() : ?object
     {
-        if (empty($this->hostsBatch)) {
-            $this->hostsBatch = $this->getNextHostsBatch();
+        if ($this->hostsBatch->isEmpty()) {
+            $this->hostsBatch->push(...$this->getNextHostsBatch());
         }
-        return (empty($this->hostsBatch)) ? null : array_pop($this->hostsBatch);
+        return ($this->hostsBatch->isEmpty()) ? null : $this->hostsBatch->pop();
     }
 
     /**
@@ -126,18 +132,18 @@ class HostsService implements HostsServiceInterface
                 'sort' => ['fetched' => 1]
             ]
         )->toArray();
-        if (empty($hosts)) {
-            return null;
+        if (!empty($hosts)) {
+            $this->collection->bulkWrite(
+                array_map(function ($host) {
+                    $this->knownHosts->add($host->host);
+                    return ['updateOne' => [
+                                ['_id' => $host->_id],
+                                ['$currentDate' => ['fetched' => true]]
+                            ]];
+                }, $hosts),
+                ['ordered' => false, 'writeConcern' => new WriteConcern(0)]
+            );
         }
-        $_ids =  array_map(function ($host) {
-            $this->knownHosts[$host->host] = true;
-            return $host->_id;
-        }, $hosts);
-
-        $this->collection->updateMany(
-            ['_id' => ['$in' => $_ids]],
-            ['$currentDate' => ['fetched' => true],'$set' => ['before' => new UTCDateTime(floor(microtime(true) * 1000) - $this->crawlDelay)]]
-        );
         return $hosts;
     }
 
@@ -149,7 +155,7 @@ class HostsService implements HostsServiceInterface
      */
     public function addHost(string $hostname) : bool
     {
-        if (isset($this->knownHosts[$hostname])) {
+        if ($this->knownHosts->contains($hostname)) {
             return false;
         }
         $result = $this->collection->updateOne(
@@ -157,10 +163,10 @@ class HostsService implements HostsServiceInterface
             ['$set' => ['host' => $hostname]],
             ['upsert' => true]
         );
-        $this->knownHosts[$hostname] = true;
+        $this->knownHosts->add($hostname);
         // if knownHosts array gets too big, remove half of it
-        if (count($this->knownHosts) > $this->maxKnownHosts) {
-            $this->knownHosts = array_slice($this->knownHosts, $this->maxKnownHosts / 2, null, true);
+        if ($this->knownHosts->count() > $this->maxKnownHosts) {
+            $this->knownHosts = $this->knownHosts->slice((int) ($this->maxKnownHosts / -2));
         }
         return ($result->getUpsertedCount() === 1);
     }
