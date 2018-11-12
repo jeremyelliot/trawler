@@ -3,6 +3,7 @@
 namespace Trawler;
 
 use \JeremyElliot\UrlHelper;
+use \Ds\Map;
 
 /**
  * Extracts URLs from an HTML document string
@@ -27,7 +28,8 @@ class UrlExtractor
      */
     private $options;
 
-    private $domainAcceptedCache = [];
+    /** @var Map */
+    private $domainAcceptedCache;
 
     /**
      * @var string the URL context from which to create absolute urls
@@ -74,6 +76,7 @@ class UrlExtractor
             }
         }
         $this->options = (object) $options;
+        $this->domainAcceptedCache = new Map();
     }
 
     /**
@@ -165,8 +168,8 @@ class UrlExtractor
                     return true;
                 }
                 // if the host name has been checked before, use the stored result
-                if (isset($this->domainAcceptedCache[$urlHost])) {
-                    return $this->domainAcceptedCache[$urlHost];
+                if ($this->domainAcceptedCache->hasKey($urlHost)) {
+                    return $this->domainAcceptedCache->get($urlHost);
                 }
                 // not cached, do matching
                 $accepted = false;
@@ -190,7 +193,7 @@ class UrlExtractor
                         }
                     }
                 }
-                $this->domainAcceptedCache[$urlHost] = $accepted;
+                $this->domainAcceptedCache->put($urlHost, $accepted);
                 return $accepted;
             });
     }
@@ -249,15 +252,15 @@ class UrlExtractor
      */
     private function filterSchemes(array $urls) : array
     {
-        if (empty($this->options->acceptedSchemes)) {
+        if (empty($this->options->schemes)) {
             return $urls;
         }
         return array_filter($urls, function ($url) {
             $scheme = $url->getPart('scheme');
             return (
                 empty($scheme)
-                || isset($this->options->scheme['accept'][$scheme])
-                || !isset($this->options->scheme['reject'][$scheme])
+                || isset($this->options->schemes['accept'][$scheme])
+                || !isset($this->options->schemes['reject'][$scheme])
             );
         });
     }
@@ -286,7 +289,7 @@ class UrlExtractor
             $this->context = $baseTags->item(0)->getAttribute('href');
         }
         foreach ((new \DOMXPath($doc))->query($this->hrefQuery) as $href) {
-            $url = (new UrlHelper($href->nodeValue))->get($parts);
+            $url = (new UrlHelper($href->nodeValue))->getNormalised()->get($parts);
             if (!empty($this->options->distinctUrls)) {
                 $urls[(string) $url] = $url;
             } else {
