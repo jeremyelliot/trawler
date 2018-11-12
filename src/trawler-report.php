@@ -19,8 +19,8 @@ include 'config.php';
 
 // instantiate service and runner objects
 $pagesService = new PagesService(
-    $config['db']['mongodb'] + ['collection' => ($config['db']['collections']['pages'])],
-    new HostsService($config['db']['mongodb'] + ['collection' => $config['db']['collections']['hosts']]),
+    $config['db']['mongodb'] + ['collection' => ($config['db']['pagesCollection'])],
+    new HostsService($config['db']['mongodb'] + ['collection' => $config['db']['hostsCollection']]),
     $config['fetch']['pagesService']
 );
 
