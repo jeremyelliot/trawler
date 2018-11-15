@@ -13,6 +13,8 @@ use \vipnytt\RobotsTxtParser\Client\Directives\UserAgentClient;
 use \Trawler\Service\Interfaces\PagesServiceInterface;
 use \Trawler\Service\Interfaces\HostsServiceInterface;
 use Ds\Deque;
+use Ds\Sequence;
+use Ds\Vector;
 use Ds\Set;
 use Ds\Map;
 
@@ -105,9 +107,16 @@ class PagesService implements PagesServiceInterface
      */
     private $hostsCycleTime;
 
-    /** @var array $pendingWrites */
-    private $pendingBulkWrites = [];
-    private $maxPendingBulkWrites = 10;
+    /**
+     * @var Vector
+     */
+    private $urlsPendingUpdate;
+
+    /**
+     * Bulk update will be done once number of pending urls exceeds maxUrlsPendingUpdate
+     * @var int
+     */
+    private $maxUrlsPendingUpdate = 200;
 
     private $wasUrlFound = false;
 
@@ -133,7 +142,7 @@ class PagesService implements PagesServiceInterface
         ]);
         $this->collection = $client->$database->$collection;
         $this->hostsService = $hostsService;
-        foreach (['batchSize', 'maxBatchSize', 'autoIncreaseBatchSize', 'maxPendingBulkWrites', 'maxKnownUrls',
+        foreach (['batchSize', 'maxBatchSize', 'autoIncreaseBatchSize', 'maxUrlsPendingUpdate', 'maxKnownUrls',
                     'preloadKnownUrls', 'crawlDelay'] as $key) {
             if (isset($serviceOptions[$key])) {
                 $this->$key = $serviceOptions[$key];
@@ -147,6 +156,7 @@ class PagesService implements PagesServiceInterface
         $this->hostsCache = new Deque();
         $this->hostsCache->allocate($this->batchSize);
         $this->urlsBatches = new Map();
+        $this->urlsPendingUpdate = new Vector();
     }
 
     /**
@@ -262,27 +272,30 @@ class PagesService implements PagesServiceInterface
      */
     private function getNextUrlForHost(string $hostname) : ?string
     {
-        if (empty($this->urlsBatches[$hostname])) {
+        if (!$this->urlsBatches->hasKey($hostname) || $this->urlsBatches->get($hostname)->isEmpty()) {
             // get another batch of urls for $hostname
-            $this->urlsBatches[$hostname] = array_map(function ($url) {
-                return $url->url;
-            }, $this->getNextUrlsBatch($hostname));
+            $this->urlsBatches->put(
+                $hostname,
+                $this->getNextUrlsBatch($hostname)->map(function ($url) {
+                    return $url->url;
+                })
+            );
         }
         // still no urls? remove host from urlsBatches
-        if (empty($this->urlsBatches[$hostname])) {
+        if ($this->urlsBatches->get($hostname)->isEmpty()) {
             $this->urlsBatches->remove($hostname);
             return null;
         }
-        return array_pop($this->urlsBatches[$hostname]);
+        return $this->urlsBatches->get($hostname)->pop();
     }
 
     /**
      * fetches and returns a batch of urls
      *
      * @param string $hostname name of the host
-     * @return array url objects
+     * @return Sequence url objects
      */
-    private function getNextUrlsBatch(string $hostname) : array
+    private function getNextUrlsBatch(string $hostname) : Vector
     {
         $urls = $this->collection->find(
             [
@@ -302,7 +315,7 @@ class PagesService implements PagesServiceInterface
                 ['ordered' => false, 'writeConcern' => new WriteConcern(0)]
             );
         }
-        return $urls;
+        return new Vector($urls);
     }
 
     /**
@@ -411,7 +424,7 @@ class PagesService implements PagesServiceInterface
     /**
      * Adds new URLs to the collection
      *
-     * @param string[] $urls array of URLs
+     * @param array $urls array of URLs
      * @return int number of new URLs added
      */
     public function addUrls(array $urls) : int
@@ -419,32 +432,46 @@ class PagesService implements PagesServiceInterface
         if (empty($urls)) {
             return 0;
         }
-        $updates = [];
-        foreach ($urls as $url) {
-            // check url is not already known
-            if (!$this->knownUrls->contains($url)) {
-                $host = (string) (new UrlHelper($url))->get('base');
-                $this->hostsService->addHost($host);
-                $updates[] = ['updateOne' => [
-                            ['url' => "$url"],
-                            ['$set' => ['url' => "$url", 'host' => $host]],
-                            ['upsert' => true]
-                        ]];
-                $this->knownUrls->add($url);
-            }
+        $pendingBefore = $this->urlsPendingUpdate->count();
+        // filter out known urls and iterate over the new urls
+        foreach (array_filter($urls, function ($url) {
+            return !$this->knownUrls->contains($url);
+        }) as $url) {
+            // add the host from this url
+            $this->hostsService->addHost((string) (new UrlHelper($url))->get('base'));
+            $this->urlsPendingUpdate->push($url);
+            $this->knownUrls->add($url);
         }
-        $this->pendingBulkWrites += $updates;
-        if (count($this->pendingBulkWrites) >= $this->maxPendingBulkWrites) {
-            $this->collection->bulkWrite(
-                $this->pendingBulkWrites,
-                ['ordered' => false, 'writeConcern' => new WriteConcern(0)]
-            );
-            $this->pendingBulkWrites = [];
+        $numNewUrls = $this->urlsPendingUpdate->count() - $pendingBefore;
+        // if there are enough pending urls, do the bulk update
+        if ($this->urlsPendingUpdate->count() >= $this->maxUrlsPendingUpdate) {
+            $this->updateUrls($this->urlsPendingUpdate);
+            $this->urlsPendingUpdate->clear();
         }
+        // if knownUrls list is too big, discard the older half
         if ($this->knownUrls->count() > $this->maxKnownUrls) {
             $this->knownUrls = $this->knownUrls->slice((int) $this->maxKnownUrls / -2);
         }
-        return count($updates);
+        return $numNewUrls;
+    }
+
+    /**
+     * Do the bulk update of urls
+     *
+     * @param \Ds\Sequence $urls
+     */
+    private function updateUrls(Sequence $urls)
+    {
+        $this->collection->bulkWrite(
+            $urls->map(function ($url) {
+                return  ['updateOne' => [
+                            ['url' => "$url"],
+                            ['$set' => ['url' => "$url", 'host' => (string) (new UrlHelper($url))->get('base')]],
+                            ['upsert' => true]
+                        ]];
+            })->toArray(),
+            ['ordered' => false, 'writeConcern' => new WriteConcern(0)]
+        );
     }
 
     /**
@@ -492,27 +519,19 @@ class PagesService implements PagesServiceInterface
     }
 
     /**
-     * undocumented function summary
-     *
-     * Undocumented function long description
-     *
-     * @param type var Description
-     * @return return type
+     * Commit pending url updates and reset status of pages in processing states
      */
     public function __destruct()
     {
         // do any pending bulk writes
-        if (!empty($this->pendingBulkWrites)) {
-            $this->collection->bulkWrite(
-                $this->pendingBulkWrites,
-                ['ordered' => false, 'writeConcern' => new WriteConcern(0)]
-            );
+        if (!$this->urlsPendingUpdate->isEmpty()) {
+            $this->updateUrls($this->urlsPendingUpdate);
         }
         // return unfetched urls with status: 'fetching' to status: [not set]
         if (!$this->urlsBatches->isEmpty()) {
             $updates = [];
             foreach ($this->urlsBatches as $hostname => $urls) {
-                if (!empty($urls)) {
+                if (!$urls->isEmpty()) {
                     foreach ($urls as $url) {
                         $updates[] = ['updateOne' => [
                             ['url' => $url],
@@ -537,8 +556,8 @@ class PagesService implements PagesServiceInterface
         if (!$this->urlsBatches->hasKey($hostname)) {
             return;
         }
-        if (!empty($this->urlsBatches[$hostname])) {
-            foreach ($this->urlsBatches[$hostname] as $url) {
+        if (!$this->urlsBatches->get($hostname)->isEmpty()) {
+            foreach ($this->urlsBatches->get($hostname) as $url) {
                 $updates[] = ['updateOne' => [
                     ['url' => $url],
                     ['$unset' => ['status' => '']]

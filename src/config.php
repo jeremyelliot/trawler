@@ -26,7 +26,7 @@ $config = [
             'autoIncreaseBatchSize' => true,
             'maxBatchSize' => 32,
             'crawlDelay' => 10 * 1000,
-            'maxPendingBulkWrites' => 1,
+            'maxUrlsPendingUpdate' => 1,
             'maxKnownUrls' => 0,
             'preloadKnownUrls' => false
         ],
@@ -53,7 +53,7 @@ $config = [
         ],
         'pagesService' => [
             'batchSize' => 1,
-            'maxPendingBulkWrites' => 200,
+            'maxUrlsPendingUpdate' => 200,
             'maxKnownUrls' => 200000,
             'preloadKnownUrls' => true
         ],
