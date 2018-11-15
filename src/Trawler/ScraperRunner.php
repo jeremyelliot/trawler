@@ -7,7 +7,7 @@ use \Trawler\Scraper\Scraper;
 use \Trawler\Service\Interfaces\PagesServiceInterface;
 
 /**
- *
+ * Gets pages from the PagesService and passes them to each scraper before returning them to the PagesService
  */
 class ScraperRunner
 {
