@@ -53,7 +53,8 @@ class UrlScraper implements Scraper
     public function extractFrom(string $pageUrl, string $html) : string
     {
         $insertedCount = 0;
-        $urls = (new UrlExtractor($this->options))->getAbsoluteUrls($pageUrl, $html);
+        $urls = $this->urlExtractor->getAbsoluteUrls($pageUrl, $html);
+        // $urls = (new UrlExtractor($this->options))->getAbsoluteUrls($pageUrl, $html);
         $urlCount = count($urls);
         if ($urlCount > 0) {
             $insertedCount = $this->pagesService->addUrls($urls);
