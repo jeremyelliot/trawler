@@ -31,13 +31,7 @@ class UrlScraper implements Scraper
 
     /**
      * $options array includes filters for URL file extensions, domains, and schemes
-     *
-     * Example $options =
-     *  [
-     *      'ignoredExtensions' => ['js', 'css', 'jpg', 'png', 'jpeg', 'gif', 'ico'],
-     *      'ignoredDomains' => ['instagram.com', 'twitter.com', 'facebook.com'],
-     *      'acceptedSchemes' => ['https', 'http', 'ftp']
-     *  ]
+     * @see UrlExtractor::__construct
      *
      * @param PagesService $pagesService
      * @param array $options Options
@@ -59,7 +53,7 @@ class UrlScraper implements Scraper
     public function extractFrom(string $pageUrl, string $html) : string
     {
         $insertedCount = 0;
-        $urls = $this->urlExtractor->getAbsoluteUrls($pageUrl, $html);
+        $urls = (new UrlExtractor($this->options))->getAbsoluteUrls($pageUrl, $html);
         $urlCount = count($urls);
         if ($urlCount > 0) {
             $insertedCount = $this->pagesService->addUrls($urls);
