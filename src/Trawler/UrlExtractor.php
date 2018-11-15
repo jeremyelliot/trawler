@@ -4,6 +4,8 @@ namespace Trawler;
 
 use \JeremyElliot\UrlHelper;
 use \Ds\Map;
+use \Ds\Sequence;
+use \Ds\Vector;
 
 /**
  * Extracts URLs from an HTML document string
@@ -30,6 +32,10 @@ class UrlExtractor
 
     /** @var Map */
     private $domainAcceptedCache;
+    // TODO: make configurable
+    private $domainAcceptedCacheSize = 10000;
+    private $domainAcceptedCacheChunkSize = 100;
+
 
     /**
      * @var string the URL context from which to create absolute urls
@@ -85,9 +91,9 @@ class UrlExtractor
      * @param string $contextUrl the prefix for relative urls
      * @param string $html the page to extract urls from
      * @param string $parts optional dot-separated string of urls segments to use @see UrlHelper::get($parts)
-     * @return iterable extracted absolute URLs
+     * @return array extracted absolute URLs
      */
-    public function getAbsoluteUrls(string $contextUrl, string $html, string $parts='base.dir.file.ext.query') : iterable
+    public function getAbsoluteUrls(string $contextUrl, string $html, string $parts='base.dir.file.ext.query') : array
     {
         $this->context = $contextUrl;
         $urls = $this->getUrls($html, $parts);
@@ -110,10 +116,14 @@ class UrlExtractor
     *
     * @param string $html the page to extract urls from
     * @param string $parts optional dot-separated string of urls segments to use @see UrlHelper::get($parts)
-    * @return iterable extracted URLs
+    * @return array extracted URLs
     */
-    public function getUrls(string $html, string $parts='base.dir.file.ext.query') : iterable
+    public function getUrls(string $html, string $parts='base.dir.file.ext.query') : array
     {
+        if ($this->domainAcceptedCache->count() > $this->domainAcceptedCacheSize) {
+            $this->domainAcceptedCache = $this->domainAcceptedCache
+                ->slice(- $this->domainAcceptedCacheSize + $this->domainAcceptedCacheChunkSize);
+        }
         return array_map(
             function ($url) {
                 return (string) $url;
@@ -124,7 +134,7 @@ class UrlExtractor
                             $this->getAllUrls($html, $parts)
                         )
                     )
-                )
+                )->toArray()
         );
     }
 
@@ -133,14 +143,14 @@ class UrlExtractor
     *
     * Does not exclude URLs with no host.
     *
-    * @param array $urls URLs to filter
-    * @return array filtered URLs
+    * @param Sequence $urls URLs to filter
+    * @return Sequence filtered URLs
     */
-    private function filterExtensions(array $urls) : array
+    private function filterExtensions(Sequence $urls) : Sequence
     {
         return (empty($this->options->extensions))
             ? $urls
-            : array_filter($urls, function ($url) {
+            : $urls->filter(function ($url) {
                 $ext = $url->getPart('ext');
                 return (
                     empty($ext)
@@ -155,14 +165,14 @@ class UrlExtractor
     *
     * Does not exclude URLs with no host.
     *
-    * @param array $urls URLs to filter
-    * @return array filtered URLs
+    * @param Sequence $urls URLs to filter
+    * @return Sequence filtered URLs
     */
-    private function filterDomains(array $urls) : array
+    private function filterDomains(Sequence $urls) : Sequence
     {
         return (empty($this->options->domains))
             ? $urls
-            : \array_filter($urls, function ($url) {
+            : $urls->filter(function ($url) {
                 $urlHost = (string) $url->getPart('host');
                 if (empty($urlHost)) {
                     return true;
@@ -247,15 +257,15 @@ class UrlExtractor
      *
      * Does not exclude URLs with no scheme.
      *
-     * @param array $urls URLs to filter
-     * @return array filtered URLs
+     * @param Sequence $urls URLs to filter
+     * @return Sequence filtered URLs
      */
-    private function filterSchemes(array $urls) : array
+    private function filterSchemes(Sequence $urls) : Sequence
     {
         if (empty($this->options->schemes)) {
             return $urls;
         }
-        return array_filter($urls, function ($url) {
+        return $urls->filter(function ($url) {
             $scheme = $url->getPart('scheme');
             return (
                 empty($scheme)
@@ -273,9 +283,9 @@ class UrlExtractor
      *
      * @param string $html the page to extract urls from
      * @param string $parts optional dot-separated string of urls segments to use @see UrlHelper::get($parts)
-     * @return array extracted URLs
+     * @return \Ds\Sequence extracted URLs
      */
-    private function getAllUrls(string $html, string $parts) : array
+    private function getAllUrls(string $html, string $parts) : \Ds\Sequence
     {
         $urls = [];
         // Prevent HTML errors from bubbling up.
@@ -296,6 +306,6 @@ class UrlExtractor
                 $urls[] = $url;
             }
         }
-        return array_values($urls);
+        return new Vector(array_values($urls));
     }
 }
