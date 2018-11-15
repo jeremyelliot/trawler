@@ -82,6 +82,6 @@ if ($trawlerInitialise ?? false) {
     echo 'initialising...';
     $config['fetch']['pagesService']['batchSize'] = 1;
     $config['scrape']['pagesService']['batchSize'] = 1;
-    $config['scrape']['pagesService']['maxPendingBulkWrites'] = 1;
+    $config['scrape']['pagesService']['maxUrlsPendingUpdate'] = 1;
     $config['scrape']['pagesService']['preloadKnownUrls'] = false;
 }
